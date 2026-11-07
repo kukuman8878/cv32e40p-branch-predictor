@@ -15,7 +15,7 @@
 | `core/frontend/frontend.sv` | 前端集成 | 预测如何接进取指 PC 选择的参考 |
 
 关键结论：
-1. **面积问题**：CVA6 的 BTB 在 FPGA 上明确用 BRAM（`SyncDpRam`），ASIC 才用 DFF——说明我们遇到的"寄存器 BTB → 128:1 mux 爆炸"是业界公认的坑，解决办法就是 SRAM/BRAM 宏。本项目的 SRAM 口径裁决与 CVA6 实践一致。
+1. **面积问题**：CVA6 的 BTB 在 FPGA 上明确用 BRAM（`SyncDpRam`），ASIC 才用 DFF——说明我们遇到的"寄存器 BTB → 128:1 mux 爆炸"是业界公认的坑，解决办法就是 SRAM/BRAM 宏。本项目的 SRAM 口径与 CVA6 实践一致。
 2. **健壮性**：可借用 `flush_bp_i`（context switch 清空）、`debug_mode_i` 门控、`valid` 位首次遇见处理。我们当前 BTB 有 tag（比 CVA6 的 ASIC BTB 更强，CVA6 直接映射无 tag）。
 
 ## 二、规模相近的 RV32 教育/竞赛核（含 branch_predictor.sv）
@@ -50,9 +50,9 @@
 | # | 建议 | 迭代 | 落地结果 | 是否生效 |
 |---|---|---|---|---|
 | 1 | BTB 改 SRAM/BRAM | 迭代 1 | 同步读 + 非打包数组，`memory_libmap` 映到 4×RAMB4_S16_S16 | ✅ 生效，EN1 110036→63548（-42.25%） |
-| 2 | `flush_bp_i` | 迭代 2 | 复用 `pc_set`/`pc_mux`（FENCEI/EXCEPTION/MRET/URET）清 valid | ✅ 生效（单测 T8 覆盖） |
-| 3 | `debug_mode_i` | 迭代 2 | 门控训练、读保留，语义对齐 CVA6 | ✅ 生效（单测 T9 覆盖） |
-| 4 | BHT `valid` 位 | 迭代 2 | per-entry valid + flush 清 valid | ✅ 生效（单测 T7 覆盖） |
+| 2 | `flush_bp_i` | 迭代 2 | 复用 `pc_set`/`pc_mux`（FENCEI/EXCEPTION/MRET/URET）清 valid | ✅ 生效（单测覆盖） |
+| 3 | `debug_mode_i` | 迭代 2 | 门控训练、读保留，语义对齐 CVA6 | ✅ 生效（单测覆盖） |
+| 4 | BHT `valid` 位 | 迭代 2 | per-entry valid + flush 清 valid | ✅ 生效（单测覆盖） |
 | 5 | 缩表深 32 | 迭代 3 | BTB_ENTRIES 128→32 | ✅ 生效，EN1 65573→53947（-17.7%） |
 | 6 | RAS 预测 JAL/JALR | 迭代 3/4 | JAL 直接预测 + RAS 返回栈 | ❌ **零收益，已回退** |
 
