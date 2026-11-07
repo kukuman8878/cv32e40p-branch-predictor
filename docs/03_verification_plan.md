@@ -1,6 +1,6 @@
-# G1 基线冻结：验证计划与环境记录
+# 基线冻结：验证计划与环境记录
 
-> Agent A（实施）在 G1 Gate 的交付：固定工具链/编译选项/仿真参数，跑出原核三类
+> 基线冻结阶段的交付：固定工具链/编译选项/仿真参数，跑出原核三类
 > 基准程序的周期基线，并固化"一条命令复现"。本文件即环境记录。
 > 未改动任何 `rtl/*.sv`；所有绕过仅落在 `project/tb/` 与 `project/tests/`。
 
@@ -16,7 +16,7 @@
 | Binutils | GNU ld / objcopy `2.42-1ubuntu1+6` | 同上 |
 | C 库 | picolibc `1.8.6`（非 newlib） | `/usr/lib/picolibc/riscv64-unknown-elf` |
 | Verilator | `5.052 2026-09-05 rev conda-forge build` | conda-forge |
-| 仿真器 | 仅 Verilator（无 Questa） | G0 已确认 |
+| 仿真器 | 仅 Verilator（无 Questa） | 已确认 |
 
 ## 2. 编译选项（所有程序一致，与 example_tb Makefile 同构）
 
@@ -67,7 +67,7 @@ crt0.S  <prog>.c  syscalls.c  vectors.S
 
 `riscv32-unknown-elf-objcopy -O verilog`（binutils 2.42）输出**已按字节粒度**
 （每 token 2 位十六进制、每行 16 字节、`@addr` 标记），与 `dp_ram.mem`（`logic[7:0]` 字节
-数组）的 `$readmemh` 语义一致，**可直接加载**。G0 记录的"objcopy 32-bit 字格式截断坑"
+数组）的 `$readmemh` 语义一致，**可直接加载**。此前记录的"objcopy 32-bit 字格式截断坑"
 系当时无工具链、手写 hex 时对 objcopy 行为的推断；实测此坑在当前 binutils 下不存在。
 
 ```bash
@@ -89,14 +89,14 @@ riscv32-unknown-elf-objcopy -O verilog <prog>.elf <prog>.hex
 | 周期计数 | tb 自由运行计数器 `cycle_count_q`（rst_n 释放后每个 posedge +1），`$finish` 时打印 `[CYCLE] cycle_count = N` | `project/tb/tb_top.sv` |
 | 退出判定 | 程序 `_exit(0)` 写 `0x20000004` → `EXIT SUCCESS`；grep 日志判定 PASS/FAIL | |
 
-## 6. 原核回归结果（第 1 条交付）
+## 6. 原核回归结果
 
 | 程序 | 结果 | 退出码 | 周期数 | 日志 |
 |---|---|---|---|---|
 | hello_world（"hello world!"） | PASS | 0（EXIT SUCCESS） | 3533 | `project/metrics/logs/hello_world_run.log` |
 | fib（fib(20)=6765） | PASS | 0 | 377169 | `project/metrics/logs/fib_run.log` |
 
-## 7. 三类基准程序基线周期数（第 2 条交付）
+## 7. 三类基准程序基线周期数
 
 同一 crt0/link.ld/syscalls、同一编译选项、确定性仿真（3 次重跑 branch_heavy 均为
 20912 周期）：
@@ -109,9 +109,9 @@ riscv32-unknown-elf-objcopy -O verilog <prog>.elf <prog>.hex
 
 > 周期数语义：`cycle_count_q` 从 reset 释放后的第一个 posedge 起计，到 `exit_valid`
 > 触发 `$finish` 的 posedge 为止。预测关闭（现状，IF 无条件分支预测）下的基线，
-> 供 G2 起"预测关闭 vs 预测开启"对照使用。
+> 供后续"预测关闭 vs 预测开启"对照使用。
 
-## 8. 复现命令（第 4 条交付）
+## 8. 复现命令
 
 ```bash
 cd /home/kukuman/RISC/project
@@ -124,26 +124,26 @@ cd /home/kukuman/RISC/project
    → 打印汇总表。
 2. 环境快照写入 `project/metrics/logs/environment_g1.txt`。
 
-## 9. 日志采集方式（第 3 条交付）
+## 9. 日志采集方式
 
 - 编译日志：`project/metrics/logs/<prog>_compile.log`
 - 运行日志：`project/metrics/logs/<prog>_run.log`（含 stdout、`[CYCLE]`、`EXIT SUCCESS/FAILURE`）
 - Verilator 构建日志：`project/metrics/logs/build_tb.log`
 - 环境快照：`project/metrics/logs/environment_g1.txt`
 
-## 10. 上一轮 P2 关闭（第 5 条交付）
+## 10. 上一阶段遗留项关闭
 
-- **B-G0-001（已关）**：`docs/01_architecture_map.md` 中 `branch_req` 行号
+- **行号修正（已修）**：`docs/01_architecture_map.md` 中 `branch_req` 行号
   `if_stage:217-218` → `218-219`（两处：取指路径图 §1、事务风险 §3）。已复核源码
   `rtl/cv32e40p_if_stage.sv:217-218`（`if (pc_set_i)` @217 / `branch_req=1'b1` @218）。
-- **B-G0-002（已关）**：已装 riscv32-unknown-elf-gcc（13.2.0）+ picolibc，并在同一
+- **工具链（已装）**：已装 riscv32-unknown-elf-gcc（13.2.0）+ picolibc，并在同一
   commit `b353438` 上跑通真实 hello_world（EXIT SUCCESS，3533 周期）与 fib；CoreMark
-  尚未集成到 example_tb 流（CoreMark 需要其自身 harness/计时接口，列为 G1 未完成项，见提交单）。
-- **B-G0-003（已关，环境记录）**：正式 core-v-verif 验证必须显式
+  尚未集成到 example_tb 流（CoreMark 需要其自身 harness/计时接口，列为未完成项）。
+- **core-v-verif 版本锁定（已记录）**：正式 core-v-verif 验证必须显式
   `CV_CORE_HASH=b353438ff469c030c89f6804f3b24a2852880e8b`（或改用本地 RTL 路径），
-  禁止使用默认 `fcd5968`。本 Gate 未实跑 core-v-verif（需 Questa/VCS），仅锁定该事实。
+  禁止使用默认 `fcd5968`。本阶段未实跑 core-v-verif（需 Questa/VCS），仅锁定该事实。
 
 ## 11. 未改动声明
 
 `rtl/*.sv`、`example_tb/**`、`bhv/**` 均为只读；仓库 `git status` 仅新增 `sim_build/`
-（未跟踪）。G1 全部产物在 `project/`（`tests/`、`tb/`、`metrics/`、`scripts/`、`docs/`、`reviews/`）。
+（未跟踪）。全部产物在 `project/`（`tests/`、`tb/`、`metrics/`、`scripts/`、`docs/`）。

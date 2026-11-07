@@ -1,6 +1,6 @@
-# G0 架构分析：CV32E40P 分支预测集成前的基础架构地图
+# 架构分析：CV32E40P 分支预测集成前的基础架构地图
 
-> 本文件为 Agent A（分析与实施）在 **G0 架构分析 Gate** 的只读分析产出，不改动任何功能 RTL。
+> 本文件为架构分析阶段的只读分析产出，不改动任何功能 RTL。
 > 所有 `文件:行号` 引用均来自基线 commit `b353438ff469c030c89f6804f3b24a2852880e8b` 的实际源码，未确认之处已标注。
 
 ---
@@ -221,7 +221,7 @@ CV32E40P **不使用显式 epoch/tag**，而是采用 **“冲刷计数器 + FIF
 
 ## 5. 对照实验规范（可执行建议）
 
-> 赛方细则未提供（待核实开放项），以下为可执行的基线对照建议，供 G5 综合/PPA 与仿真
+> 赛方细则未提供（待核实开放项），以下为可执行的基线对照建议，供综合/PPA 与仿真
 > 对比使用。
 
 | 维度 | 建议固定值 | 说明 |
@@ -230,8 +230,8 @@ CV32E40P **不使用显式 epoch/tag**，而是采用 **“冲刷计数器 + FIF
 | 软件镜像 | 同一份 hello_world / CoreMark / Dhrystone 二进制（.hex） | 基线 commit 的 `example_tb/core/custom/hello_world.c` |
 | 仿真器 | Verilator 5.052（本机已装） | 已实测可跑通（见 §6） |
 | 仿真内存延迟 | 固定 `mm_ram` 默认 1 拍延迟；用 `+maxcycles` 统一上限 | `example_tb/core/mm_ram.sv` |
-| 频率约束 | 约束文件 `constraints/` 下（待确认具体 SDC 目标频率） | G5 再定 |
-| 综合库 | 未确认（yosys 未装，G5 阶段再定） | 记录于风险清单 P2 |
+| 频率约束 | 约束文件 `constraints/` 下（待确认具体 SDC 目标频率） | 综合阶段再定 |
+| 综合库 | 未确认（yosys 未装，综合阶段再定） | 记录于风险清单 P2 |
 | seed | 随机 stall 使用固定 seed | `riscv_gnt_stall/rvalid_stall` |
 | 日志采集 | 统一 `+verbose` + `trace_core*.log`（或 VCD），保存 `$finish` 退出码与 `EXIT SUCCESS/FAILURE` | 见 §6 示例 |
 | 关键对比指标 | 周期数（`$finish` 时刻）、误预测数、CPI、综合面积/时序 | 预测关闭 vs 预测开启两轮 |
@@ -248,7 +248,7 @@ cd example_tb/core && make custom-vsim-run
 ```
 结果：**失败**。`make` 退出码 `2`；`vlib-10.7b: not found`（子进程 127）。
 原因：Questasim（vsim/vlog/vlib/vopt）与 `riscv32-unknown-elf-gcc` 均未安装
-（`which` 均无结果）。日志：`project/logs/make_custom_vsim_run_FAIL.log`。
+（`which` 均无结果）。
 
 ### 6.2 Verilator 直接编译（未修改源码）
 
@@ -286,7 +286,6 @@ verilator --binary --timing -Wall -Wno-fatal ... <manifest RTL> <example_tb *.sv
 EXIT SUCCESS
 - Verilator: $finish at 110ns
 ```
-完整日志：`project/logs/verilator_run_success.log`。
 
 > 结论：原核 example_tb 在当前工具链（无 Questa/无 RISC-V gcc）下无法按 README 原样
 > 运行；经本地绕过（参数名修正 + 排除 FP wrapper + 字节粒度 hex）后，**核心 RTL 可在
@@ -332,7 +331,7 @@ EXIT SUCCESS
 ### P2（低风险/待核实）
 9. **RISC-V 工具链缺失**：本机无 `riscv32-unknown-elf-gcc`，官方固件编译无法进行，需装
    SDK 才能跑真实 benchmark（CoreMark/Dhrystone）。
-10. **综合库/频率目标未确认**：yosys 未装、赛方细则未给，G5 综合阶段前需补齐。
+10. **综合库/频率目标未确认**：yosys 未装、赛方细则未给，综合阶段前需补齐。
 11. **example_tb 仅“最小 sanity”**：README 明确“不可用于验证改动”，正式验证须走
     core-v-verif。
 12. **`objcopy -O verilog` 字节序/字宽坑**：verilator 下字节数组 `$readmemh` 行为与
