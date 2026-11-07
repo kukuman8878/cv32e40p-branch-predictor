@@ -1,22 +1,21 @@
 # 最终版：设计报告与结果（04_results.md）
 
-> Agent A（实施）在阶段 4（迭代 5）收尾后的最终交付物。汇总 G0–G5 首版成果、迭代 1/2/3
-> 的后续优化、迭代 3/4 的 JAL/RAS 回退结论、诚实的未完成/未评估项，以及可复现流程。
-> 本文所有结果均为实际执行；"未做/未评估"均已显式标注。**本文不构成 PASS 判定**
-> （由 Agent B 独立审核放行）。最终交付 commit `36a8c91`（分支 `feature/sram-btb`）。
+> 本项目的最终交付物。汇总首版成果、迭代 1/2/3 的后续优化、迭代 3/4 的 JAL/RAS 回退结论、
+> 诚实的未完成/未评估项，以及可复现流程。本文所有结果均为实际执行；"未做/未评估"均已显式标注。
+> 最终交付 commit `36a8c91`（分支 `feature/sram-btb`）。
 
 ---
 
 ## 0. 一句话结论
 
 在固定 commit `b353438` 的 OpenHW CV32E40P（4 级顺序、EX 决议条件分支）上新增了
-**可参数化关闭的动态分支预测（2-bit BHT + 直接映射 BTB）**。首版（G6，异步读寄存器
+**可参数化关闭的动态分支预测（2-bit BHT + 直接映射 BTB）**。首版（异步读寄存器
 BTB）功能正确但面积爆炸（BASE→EN1 +155.41%）；经**迭代 1（BTB/BHT 同步读 SRAM 化）**、
 **迭代 2（健壮性：BR_PREDICT_EN 门控 + BHT valid + flush_bp_i + debug_mode_i）**、
 **迭代 3（BTB 128→32 缩表深）**后，面积降为 **BASE→EN1 +25.2%**（generic 无 BRAM 口径，
 `memory_libmap` 可把 BTB 存储映到 4×RAMB4_S16_S16）。**迭代 3/4 尝试的 JAL 直接预测与
 RAS 返回预测经实测零收益，已回退**：根因是 CV32E40P 的 **JAL/JALR 均在 ID 阶段已由
-控制器解析**（非任务假设的"EX 才决议"），ID 阶段跳转/返回预测与控制器既有 ID 解析时序
+控制器解析**（非假设的"EX 才决议"），ID 阶段跳转/返回预测与控制器既有 ID 解析时序
 等价，IF 阶段预测又因组合环不可行，故无周期改善（证据见 §8）。最终功能不变：EN0 与基线
 逐位一致、EN1 功能正确（寄存器签名 EN0==EN1）、分支密集/低分支/hello_world 分别取得
 **+6.03% / +9.44% / +14.75%** 周期改善，**fib/mixed 负收益（-1.65% / -3.40%）**；
@@ -49,7 +48,7 @@ WNS/功耗未评估（无时序/功耗库）。
 - **参数开关** `BR_PREDICT_EN`（0/1），同一 RTL 代码库支持 A/B 对照。
 - **统计接口**：branch_total / pred_taken / correct / mispredict（tb 观测口读出）。
 
-### 1.3 明确不做（沿用 G0 范围 + 迭代结论）
+### 1.3 明确不做（沿用范围 + 迭代结论）
 
 不重写整颗 CPU；**不预测 JAL/JALR**（迭代 3/4 实测零收益后回退，见 §8）；不加乱序、
 Cache 或全局历史预测器；不声称流片/功耗实测/FPGA 上板（均未做）。
@@ -94,14 +93,14 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 基线 CPU **不使用显式 epoch/tag**，靠 `flush_cnt_q` + FIFO flush 作废旧路径。本预测器
 **同样不引入 epoch/tag**，而是复用同一 flush 通道：预测重定向与真实决议共享
 `pc_set_i/branch_i`，训练禁止时机覆盖 (a) `flush_cnt_q>0` 冲刷期、(b) 异常/中断/debug
-重定向、(c) `is_fetch_failed`/`instr_err`。G5 的 ⑦ stall+flush 同周期定向测试
-（`g5_stall_flush`）与 ⑪ 旧路径响应测试覆盖了这一边界。
+重定向、(c) `is_fetch_failed`/`instr_err`。stall+flush 同周期定向测试（`g5_stall_flush`）
+与旧路径响应测试覆盖了这一边界。
 
 ---
 
 ## 3. 验证结果汇总
 
-### 3.1 G1 基线（EN=0，预测关闭）
+### 3.1 基线（EN=0，预测关闭）
 
 | 程序 | 结果 | 周期数 | 源 |
 |---|---|---|---|
@@ -114,7 +113,7 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 证据：`metrics/logs/*_run.log`、`metrics/logs/environment_g1.txt`；
 一键复现 `./scripts/reproduce.sh`。
 
-### 3.2 G2 单测（BHT/BTB）
+### 3.2 单测（BHT/BTB）
 
 | 模块 | lint | 测试 | 覆盖 |
 |---|---|---|---|
@@ -124,7 +123,7 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 证据：`metrics/logs/g2_bht_{lint,build,run}.log`、`g2_btb_{lint,build,run}.log`；
 一键复现 `./scripts/run_unit_tests.sh`。
 
-### 3.3 G4 定向测试 + 一致性
+### 3.3 定向测试 + 一致性
 
 12 项定向测试（BHT 饱和、BTB alias、首次分支、全 not-taken、交替、前向/后向、嵌套
 相邻、RVC、JAL/JALR、fence.i、定时器中断、一致性）在 **EN=0 与 EN=1 双模型全部 PASS**，
@@ -134,7 +133,7 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 `metrics/logs/g4_en{0,1}_consistency.sig`、`g4_consistency_diff.log`；
 一键复现 `./scripts/g4_full.sh`。
 
-### 3.4 G5 性能 / PPA 汇总
+### 3.4 性能 / PPA 汇总
 
 **性能（`metrics/g5_cycle_cpi.csv`，最终版 BTB=32）**：
 
@@ -147,7 +146,7 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 | low_branch | 78753 | 71320 | 1.403 | 1.271 | 95.73% | **+9.44%** |
 
 > minstret EN0=EN1 逐项相等（2274/320457/12987/2498136/56130），证明退休指令一致、
-> CPI 差异唯一由周期数驱动。EN0 周期 3533/377169/20912/3106787/78753 与 G1 基线逐位一致。
+> CPI 差异唯一由周期数驱动。EN0 周期 3533/377169/20912/3106787/78753 与基线逐位一致。
 
 **PPA（`metrics/sram_synth_summary.csv`，最终版：同步读 SRAM + BTB=32，无 JAL/RAS）**：
 
@@ -182,7 +181,7 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 4. **fib / mixed 负收益**：数据依赖分支 + 密集 JAL/JALR（不预测），~50% 准确率导致净损。
    JAL 直接预测 / RAS 返回预测（迭代 3/4）经实测**零收益、已回退**（根因见 §8）。
 5. **CoreMark：未跑**（需其自身 harness/计时接口，尚未集成到 example_tb 流）。
-6. **spike ISS：未安装**（参考模型对拍未做，以"内存 + 寄存器文件"双签名替代，B 已接受）。
+6. **spike ISS：未安装**（参考模型对拍未做，以"内存 + 寄存器文件"双签名替代）。
 7. **core-v-verif UVM：未跑**（需 Questa/VCS 商业仿真器，本机仅 verilator；已锁定
     版本事实：默认 `fcd5968` ≠ 基线 `b353438`）。
 8. **赛方细则未拿到**：报名资格 / 材料提交清单 / 评审标准 / 具体时间节点 / 提交格式
@@ -192,10 +191,10 @@ IF 预测结果打包为 `{predicted_taken, predicted_target, is_compressed}` �
 
 ## 5. 复现步骤与工具版本清单
 
-### 5.1 一键复现（G6 顶层）
+### 5.1 一键复现
 
 ```bash
-cd /home/kukuman/RISC/project
+cd project
 ./scripts/run_all.sh        # 基线 + EN0/EN1 回归 + 单测 + 全核综合，汇总后 exit 0
 ```
 
@@ -223,7 +222,6 @@ EN0/EN1）。单点复现可用任意子脚本（`g4_full.sh`、`g5_full.sh` 亦
 - 首版交付 commit：`83d5c7b67f6669e6f42ad41c8a23deab63ab0c82`（tag `release/reviewed`）
 - **最终交付 commit：`36a8c9115d6b45d9506679c20898801b3cfe48c4`**（short `36a8c91`）
 - 分支：`feature/sram-btb`（自 `release/reviewed` 检出；最终树与迭代 3 `2455b12` 逐位一致）
-- 远端 `origin` 存在但**未 push**（未获授权，见提交单）。
 
 ---
 
@@ -247,7 +245,7 @@ EN0/EN1）。单点复现可用任意子脚本（`g4_full.sh`、`g5_full.sh` 亦
 
 ---
 
-## 7. 最终自查清单（对照方案文档 §11 的 10 项）
+## 7. 最终自查清单（对照方案文档 10 项）
 
 | # | 检查项 | 状态 | 说明 |
 |---|---|---|---|
@@ -259,14 +257,14 @@ EN0/EN1）。单点复现可用任意子脚本（`g4_full.sh`、`g5_full.sh` 亦
 | 6 | 找出 branch decision、IF flush、prefetch 请求/响应逻辑 | ✅ | §1/§2/§3 |
 | 7 | 明确 RVC、异常、中断、debug、stall 支持范围 | ⚠️ | RVC/中断/stall 已测；debug 未单独定向测试 |
 | 8 | 锁定三类 benchmark、指标定义和统一环境 | ✅ | `03_verification_plan.md` |
-| 9 | 提交 G0 架构映射与风险报告给 Agent B | ✅ | `01_architecture_map.md` + G0 B verdict PASS |
-| 10 | 未获 G0 PASS 前不得开启集成功能开发 | ✅ | G0/G1 PASS 后才开始 G2 编码 |
+| 9 | 提交架构映射与风险报告 | ✅ | `01_architecture_map.md` |
+| 10 | 架构分析通过前不得开启集成功能开发 | ✅ | 架构分析/基线通过后才开始编码 |
 
 **统计：8 ✅ / 2 ⚠️ / 0 ❌**（⚠️ 均为环境/工具缺失导致的"未实跑"项，非功能缺陷）。
 
 ---
 
-## 8. 迭代演进（G6 首版 → 迭代 1/2/3 → 回退 JAL/RAS）
+## 8. 迭代演进（首版 → 迭代 1/2/3 → 回退 JAL/RAS）
 
 ### 8.1 提交链（`feature/sram-btb`）
 
@@ -295,7 +293,7 @@ b305df6  ITER4: add RAS return-address stack module + PC_RAS pc_mux selector ─
 
 | 阶段 | 关键改动 | EN1 generic（无 BRAM） | 效果 |
 |---|---|---|---|
-| G6 首版 | 异步读寄存器 BTB=128 | 110036 | BASE→EN1 +155.41% |
+| 首版 | 异步读寄存器 BTB=128 | 110036 | BASE→EN1 +155.41% |
 | 迭代 1 | 同步读 SRAM + 非打包数组 | 63548 | -42.25%（解决 mux 爆炸） |
 | 迭代 2 | BR_PREDICT_EN 门控 + valid + flush/debug | 65573（BTB=128） | EN0 回到 43317（≈BASE） |
 | 迭代 3 | BTB 128→32 | 53947（无 JAL） | 再 -11.6% |
@@ -306,7 +304,7 @@ b305df6  ITER4: add RAS return-address stack module + PC_RAS pc_mux selector ─
 
 ### 8.3 核心洞察：JAL/JALR 在 ID 决议 → 跳转/返回预测零收益（已回退）
 
-**结论**：CV32E40P 的 JAL/JALR **在 ID 阶段已由控制器解析**，并非任务假设的"EX 才决议"；
+**结论**：CV32E40P 的 JAL/JALR **在 ID 阶段已由控制器解析**，并非假设的"EX 才决议"；
 因此 ID 阶段做跳转/返回预测与控制器既有 ID 解析**时序等价**，IF 阶段预测又因组合环不可行，
 最终**零周期收益**。证据如下：
 
