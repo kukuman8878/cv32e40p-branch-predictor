@@ -1,0 +1,763 @@
+diff --git a/.gitignore b/.gitignore
+index 6c2cd79..6075c30 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -26,3 +26,5 @@ cadence_conformal
+ synopsys_formality
+ questa_autocheck
+ reports
++
++/sim_build/
+diff --git a/rtl/cv32e40p_bht.sv b/rtl/cv32e40p_bht.sv
+new file mode 100644
+index 0000000..22f99e5
+--- /dev/null
++++ b/rtl/cv32e40p_bht.sv
+@@ -0,0 +1,140 @@
++////////////////////////////////////////////////////////////////////////////////
++// Engineer:       Agent A (ITER1: synchronous-read BHT)                      //
++//                                                                            //
++// Design Name:    cv32e40p_bht                                               //
++// Project Name:   CV32E40P branch predictor (dynamic, disableable)           //
++// Language:       SystemVerilog                                              //
++//                                                                            //
++// Description:    2-bit saturating-counter branch direction predictor        //
++//                 (BHT). One counter per entry; indexed by low bits of PC.   //
++//                                                                            //
++//                 ITER1 change: the PREDICTION read is now synchronous       //
++//                 (registered output, 1-cycle read latency), matching the    //
++//                 BTB so both are driven by pc_if and land in the ID cycle.  //
++//                 The counter array itself stays an async-reset DFF array    //
++//                 (reset value = weakly not-taken must be preserved; a BRAM  //
++//                 cannot clear its content). The update path is a            //
++//                 read-modify-write on the DFF array (unchanged semantics).  //
++//                                                                            //
++//                 State encoding:                                            //
++//                   00 = strongly not-taken (SNT)                            //
++//                   01 = weakly   not-taken (WNT)  <- reset value            //
++//                   10 = weakly   taken     (WT)                             //
++//                   11 = strongly taken     (ST)                             //
++//                 Prediction = counter[1] (0 for SNT/WNT, 1 for WT/ST).      //
++//                                                                            //
++//                 BR_PREDICT_EN = 0 => predict_taken_o hardwired to 0 and    //
++//                 the state is frozen (update ignored).                      //
++//                                                                            //
++//                 ITER2 change (robustness):                                 //
++//                   - per-entry valid bit: reset/flush clears valid, and only //
++//                     a valid entry may predict taken (cold-start taken loads //
++//                     no longer predict taken before first training).         //
++//                   - flush_bp_i clears valid (fence.i / exception / context  //
++//                     switch).                                               //
++//                   - debug_mode_i disables training (update), keeps reads.  //
++//                                                                            //
++//                 Clock domain : clk (same as core).                         //
++//                 Reset        : rst_n active-low, asynchronous.             //
++//                                                                            //
++////////////////////////////////////////////////////////////////////////////////
++
++module cv32e40p_bht #(
++    parameter int unsigned DEPTH         = 128,  // number of counters (64/128/256 supported)
++    parameter bit          BR_PREDICT_EN = 1'b1  // 1 = predictor active, 0 = always predict not-taken
++) (
++    input  logic clk,    // Clock
++    input  logic rst_n,  // Asynchronous reset, active low
++
++    // Control gating (ITER2 robustness):
++    //   flush_bp_i   : clear all valid bits (fence.i / exception / context switch).
++    //   debug_mode_i : in debug mode no training happens (update disabled); the
++    //                  read/predict path is left untouched.
++    input  logic        flush_bp_i,
++    input  logic        debug_mode_i,
++
++    // BHT is indexed ONLY by PC[INDEX_W:1] (no tag, by design). Therefore the
++    // high PC bits (above INDEX_W) are intentionally unused, and bit[0] is
++    // intentionally ignored because every PC is halfword-aligned (bit0 == 0).
++    /* verilator lint_off UNUSEDSIGNAL */
++    // Read port (synchronous): predict direction for read_pc_i (1 cycle ago)
++    input  logic [31:0] read_pc_i,       // PC to predict for (byte address, halfword-aligned)
++    output logic        predict_taken_o, // 1 = predict taken, 0 = predict not-taken
++
++    // Update port (synchronous): train the counter with the resolved direction
++    input  logic        update_valid_i,  // 1 = update_taken_i is valid this cycle
++    input  logic [31:0] update_pc_i,     // PC of the branch being resolved
++    input  logic        update_taken_i   // resolved direction: 1 = taken, 0 = not-taken
++    /* verilator lint_on UNUSEDSIGNAL */
++);
++
++  localparam int unsigned INDEX_W = $clog2(DEPTH);
++
++  // Index = PC[INDEX_W:1]; bit 0 ignored (always 0 for halfword-aligned code).
++  // Halfword granularity so RVC (16-bit) branches at the same word do not alias.
++  logic [INDEX_W-1:0] read_index;
++  logic [INDEX_W-1:0] update_index;
++
++  // 2-bit saturating counter table (packed so whole table can be reset at once),
++  // plus a per-entry valid bit (ITER2): only a trained entry may predict taken.
++  logic [DEPTH-1:0][1:0] counter_q;
++  logic [DEPTH-1:0]      valid_q;
++  logic [1:0]            counter_n;
++
++  // Registered prediction output (1-cycle synchronous read). Only the MSB of
++  // the counter (the "taken" bit) is needed for the prediction, so it is
++  // registered directly; the valid bit is registered alongside it.
++  logic                  rcounter_q;
++  logic                  rvalid_q;
++
++  assign read_index   = read_pc_i[INDEX_W:1];
++  assign update_index = update_pc_i[INDEX_W:1];
++
++  // Effective update enable: gated by BR_PREDICT_EN (EN=0 constant-folds the
++  // whole table away, since predict_taken_o is also forced to 0 below) and by
++  // ~debug_mode_i (no training in debug mode).
++  logic update_en;
++  assign update_en = BR_PREDICT_EN && update_valid_i && ~debug_mode_i;
++
++  // Next-state of the entry being updated (saturating up/down).
++  always_comb begin
++    if (update_taken_i) begin
++      counter_n = (counter_q[update_index] == 2'b11) ? 2'b11 :
++                  counter_q[update_index] + 2'b01;
++    end else begin
++      counter_n = (counter_q[update_index] == 2'b00) ? 2'b00 :
++                  counter_q[update_index] - 2'b01;
++    end
++  end
++
++  // Synchronous read: register the predicted direction + valid bit (1-cycle latency).
++  always_ff @(posedge clk, negedge rst_n) begin
++    if (rst_n == 1'b0) begin
++      rcounter_q <= 1'b0;
++      rvalid_q   <= 1'b0;
++    end else begin
++      rcounter_q <= counter_q[read_index][1];
++      rvalid_q   <= valid_q[read_index];
++    end
++  end
++
++  // Prediction: MSB of the 2-bit counter, qualified by the valid bit. Hardwired
++  // to 0 when disabled.
++  assign predict_taken_o = BR_PREDICT_EN && rvalid_q && rcounter_q;
++
++  // Synchronous update + asynchronous reset (reset value = weakly not-taken).
++  // flush_bp_i clears only the valid bits (counter left stale but inert, since
++  // an invalid entry never predicts taken). First update sets the valid bit.
++  always_ff @(posedge clk, negedge rst_n) begin : BHT_STATE
++    if (rst_n == 1'b0) begin
++      counter_q <= {DEPTH{2'b01}};
++      valid_q   <= '0;
++    end else if (flush_bp_i) begin
++      valid_q   <= '0;
++    end else if (update_en) begin
++      counter_q[update_index] <= counter_n;
++      valid_q[update_index]   <= 1'b1;
++    end
++  end
++
++endmodule
+diff --git a/rtl/cv32e40p_btb.sv b/rtl/cv32e40p_btb.sv
+new file mode 100644
+index 0000000..d5f0c5c
+--- /dev/null
++++ b/rtl/cv32e40p_btb.sv
+@@ -0,0 +1,160 @@
++////////////////////////////////////////////////////////////////////////////////
++// Engineer:       Agent A (ITER1: synchronous-read SRAM/BRAM BTB)             //
++//                                                                            //
++// Design Name:    cv32e40p_btb                                               //
++// Project Name:   CV32E40P branch predictor (dynamic, disableable)           //
++// Language:       SystemVerilog                                              //
++//                                                                            //
++// Description:    Direct-mapped + tagged Branch Target Buffer (BTB).         //
++//                 Each entry = {valid, tag, target}.                         //
++//                                                                            //
++//                 ITER1 change: the read port is now a SYNCHRONOUS read      //
++//                 (registered output, 1-cycle read latency) so that the tag/ //
++//                 target array is inferred as a SRAM/BRAM macro instead of a  //
++//                 per-bit 128:1 read mux (the G6 area explosion). The `valid` //
++//                 bit stays a separate async-reset DFF array (a BRAM cannot   //
++//                 clear its content on reset), so the reset semantics         //
++//                 (no hit after reset) are unchanged.                        //
++//                                                                            //
++//                 Index = PC[INDEX_W:1], Tag = PC[31:INDEX_W+1] (bit 0       //
++//                 ignored, always 0 for halfword-aligned code).              //
++//                                                                            //
++//                 Hit  = valid && (tag_q == tag of read PC).                 //
++//                                                                            //
++//                 Alias semantics (unchanged from G2):                        //
++//                   - Two PCs with the same index but different tags: the    //
++//                     later write evicts the earlier (direct-mapped conflict).
++//                   - Two PCs that share index AND tag differ only in bit[0], //
++//                     i.e. they are byte addresses of the same halfword, so  //
++//                     they can never both be distinct branch instructions.   //
++//                                                                            //
++//                 Read timing (1-cycle latency): btb_hit_o / btb_target_o    //
++//                 reflect read_pc_i as sampled at the PREVIOUS clock edge.   //
++//                 The core therefore drives read_pc_i with pc_if (the fetch  //
++//                 PC, one cycle ahead of pc_id) so the prediction lands in   //
++//                 the ID cycle.                                              //
++//                                                                            //
++//                 ITER2 change (robustness):                                 //
++//                   - BR_PREDICT_EN parameter: EN=0 forces btb_hit_o to 0    //
++//                     and disables write_en, so an EN=0 build constant-folds //
++//                     the whole tag+target storage away (B-G5-004 closure).  //
++//                   - flush_bp_i clears all valid bits (fence.i / exception  //
++//                     / context switch), leaving tag/target stale but inert. //
++//                   - debug_mode_i disables training (write), keeps reads.   //
++//                                                                            //
++//                 Clock domain : clk (same as core).                         //
++//                 Reset        : rst_n active-low, asynchronous (clears valid).
++//                                                                            //
++////////////////////////////////////////////////////////////////////////////////
++
++module cv32e40p_btb #(
++    parameter int unsigned ENTRIES       = 32,   // number of BTB entries
++    parameter bit          BR_PREDICT_EN = 1'b1  // 1 = predictor active, 0 = fully bypassed
++) (
++    input  logic clk,    // Clock
++    input  logic rst_n,  // Asynchronous reset, active low
++
++    // Control gating (ITER2 robustness):
++    //   flush_bp_i   : clear all valid bits (fence.i / exception / context switch).
++    //   debug_mode_i : in debug mode no training happens (write disabled); the
++    //                  read/predict path is left untouched.
++    input  logic        flush_bp_i,
++    input  logic        debug_mode_i,
++
++    // bit[0] of the PC is intentionally ignored: every PC is halfword-aligned
++    // (bit0 == 0). All other bits are consumed (index = [INDEX_W:1], tag =
++    // [31:INDEX_W+1]).
++    /* verilator lint_off UNUSEDSIGNAL */
++    // Read port (synchronous: output reflects read_pc_i from 1 cycle ago)
++    input  logic [31:0] read_pc_i,    // PC to look up (byte address, halfword-aligned)
++    output logic        btb_hit_o,    // 1 = entry valid && tag matches
++    output logic [31:0] btb_target_o, // predicted target (valid only when btb_hit_o)
++
++    // Write port (synchronous)
++    input  logic        write_valid_i, // 1 = write a new entry this cycle
++    input  logic [31:0] write_pc_i,    // PC of the branch being recorded
++    input  logic [31:0] write_target_i // resolved target to store
++    /* verilator lint_on UNUSEDSIGNAL */
++);
++
++  localparam int unsigned INDEX_W = $clog2(ENTRIES);
++  localparam int unsigned TAG_W   = 32 - INDEX_W - 1;
++  localparam int unsigned DATA_W  = TAG_W + 32;  // packed {tag, target}
++
++  logic [INDEX_W-1:0] read_index;
++  logic [TAG_W-1:0]   read_tag;
++
++  logic [INDEX_W-1:0] write_index;
++  logic [TAG_W-1:0]   write_tag;
++
++  // Storage:
++  //   valid_q : separate async-reset DFF array (a BRAM cannot be reset).
++  //   mem_q   : synchronous-read tag+target array -> inferred as SRAM/BRAM.
++  //             Declared UNPACKED so sv2v keeps it a memory (a packed 2D array
++  //             would be flattened to a packed vector and expanded to a mux).
++  logic [ENTRIES-1:0]   valid_q;
++  logic [DATA_W-1:0]    mem_q [ENTRIES];  // mem_q[i] = {tag, target}
++
++  // Registered read outputs (1-cycle read latency).
++  logic        rvalid_q;
++  logic [TAG_W-1:0]   rtag_q;
++  logic [DATA_W-1:0]  rdata_q;
++
++  assign read_index  = read_pc_i[INDEX_W:1];
++  assign read_tag    = read_pc_i[31:INDEX_W+1];
++
++  assign write_index = write_pc_i[INDEX_W:1];
++  assign write_tag   = write_pc_i[31:INDEX_W+1];
++
++  // Effective write enable: gated by BR_PREDICT_EN (so an EN=0 build can
++  // constant-fold the whole storage away) and by ~debug_mode_i (no training in
++  // debug mode). When BR_PREDICT_EN==0, write_en is a compile-time 0, mem_q /
++  // valid_q are never written, and because btb_hit_o is also forced to 0 below,
++  // the entire storage becomes dead logic and is eliminated by synthesis.
++  logic write_en;
++  assign write_en = BR_PREDICT_EN && write_valid_i && ~debug_mode_i;
++
++  // Synchronous read: register the tag and the tag+target data. rdata_q is
++  // deliberately NOT async-reset (keeps it a clean sync-read for BRAM mapping);
++  // rvalid_q gates the hit so no spurious hit is observable after reset.
++  always_ff @(posedge clk) begin
++    rtag_q  <= read_tag;
++    rdata_q <= mem_q[read_index];
++  end
++
++  always_ff @(posedge clk, negedge rst_n) begin
++    if (rst_n == 1'b0) begin
++      rvalid_q <= 1'b0;
++    end else begin
++      rvalid_q <= valid_q[read_index];
++    end
++  end
++
++  // Hit = registered valid && stored tag == registered read tag. Forced to 0
++  // when the predictor is disabled so the storage can be constant-folded away.
++  // btb_target_o is also forced to 0 at EN=0 so the tag+target read path has no
++  // live output and mem_q / valid_q / the read registers all become dead logic
++  // that synthesis eliminates (this is what closes B-G5-004).
++  assign btb_hit_o    = BR_PREDICT_EN && rvalid_q && (rdata_q[DATA_W-1:32] == rtag_q);
++  assign btb_target_o = BR_PREDICT_EN ? rdata_q[31:0] : 32'd0;
++
++  // Synchronous write: mem_q has a CLEAN sync-write port (no async reset on the
++  // enable) so memory_libmap can map it to a block RAM; valid_q carries the
++  // async reset so the "no hit after reset" semantics are unchanged.
++  always_ff @(posedge clk) begin
++    if (write_en) begin
++      mem_q[write_index] <= {write_tag, write_target_i};
++    end
++  end
++
++  always_ff @(posedge clk, negedge rst_n) begin : BTB_STATE
++    if (rst_n == 1'b0) begin
++      valid_q <= '0;
++    end else if (flush_bp_i) begin
++      valid_q <= '0;
++    end else if (write_en) begin
++      valid_q[write_index] <= 1'b1;
++    end
++  end
++
++endmodule
+diff --git a/rtl/cv32e40p_controller.sv b/rtl/cv32e40p_controller.sv
+index d1c86d6..9b3e0a9 100644
+--- a/rtl/cv32e40p_controller.sv
++++ b/rtl/cv32e40p_controller.sv
+@@ -115,6 +115,13 @@ module cv32e40p_controller import cv32e40p_pkg::*;
+   input  logic [1:0]  ctrl_transfer_insn_in_id_i,               // jump is being calculated in ALU
+   input  logic [1:0]  ctrl_transfer_insn_in_dec_i,              // jump is being calculated in ALU
+ 
++  // Branch predictor recovery signals (from core). predicted_taken_ex_i is the
++  // prediction made for the conditional branch currently in EX; branch_mispredict_i
++  // is 1 when that branch was predicted taken but actually resolved not-taken.
++  input  logic        predicted_taken_ex_i,
++  input  logic        branch_mispredict_i,
++  input  logic [31:0] fall_through_i,  // fall-through target for mispredict recovery
++
+   // Interrupt Controller Signals
+   input  logic        irq_req_ctrl_i,
+   input  logic        irq_sec_ctrl_i,
+@@ -435,8 +442,13 @@ module cv32e40p_controller import cv32e40p_pkg::*;
+ 
+             is_decoding_o = 1'b0;
+ 
+-            pc_mux_o      = PC_BRANCH;
+-            pc_set_o      = 1'b1;
++            // If this branch was correctly predicted taken, the fetch has
++            // already been redirected to the target at the ID stage; suppress
++            // the redundant redirect here.
++            if (~predicted_taken_ex_i) begin
++              pc_mux_o      = PC_BRANCH;
++              pc_set_o      = 1'b1;
++            end
+ 
+             // if we want to debug, flush the pipeline
+             // the current_pc_if will take the value of the next instruction to
+@@ -444,6 +456,14 @@ module cv32e40p_controller import cv32e40p_pkg::*;
+ 
+           end  //taken branch
+ 
++          else if (branch_mispredict_i)
++          begin //predicted taken but resolved not-taken
++            // Redirect the fetch back to the sequential fall-through address.
++            is_decoding_o = 1'b0;
++            pc_mux_o      = PC_FALLTHROUGH;
++            pc_set_o      = 1'b1;
++          end  //mispredicted branch
++
+           else if (data_err_i)
+           begin //data error
+             // the current LW or SW have been blocked by the PMP
+@@ -1156,8 +1176,10 @@ module cv32e40p_controller import cv32e40p_pkg::*;
+ 
+         if (branch_taken_ex_i) begin
+           // there is a branch in the EX stage that is taken
+-          pc_mux_o = PC_BRANCH;
+-          pc_set_o = 1'b1;
++          if (~predicted_taken_ex_i) begin
++            pc_mux_o = PC_BRANCH;
++            pc_set_o = 1'b1;
++          end
+         end
+ 
+         ctrl_fsm_ns = DBG_FLUSH;
+diff --git a/rtl/cv32e40p_core.sv b/rtl/cv32e40p_core.sv
+index 4275cf9..9eab7a5 100644
+--- a/rtl/cv32e40p_core.sv
++++ b/rtl/cv32e40p_core.sv
+@@ -37,7 +37,10 @@ module cv32e40p_core
+    parameter FPU_ADDMUL_LAT = 0,  // Floating-Point ADDition/MULtiplication lane pipeline registers number
+    parameter FPU_OTHERS_LAT = 0,  // Floating-Point COMParison/CONVersion lanes pipeline registers number
+    parameter ZFINX = 0,  // Float-in-General Purpose registers
+-   parameter NUM_MHPMCOUNTERS = 1
++   parameter NUM_MHPMCOUNTERS = 1,
++   parameter BR_PREDICT_EN = 0,  // 1 = enable branch predictor, 0 = fully bypassed
++   parameter int unsigned BHT_DEPTH = 256,  // BHT number of entries
++   parameter int unsigned BTB_ENTRIES = 32  // BTB number of entries (ITER3: 128->32)
+  ) (
+    // Clock and Reset
+    input logic clk_i,
+@@ -160,6 +163,7 @@ module cv32e40p_core
+   logic               branch_in_ex;
+   logic               branch_decision;
+   logic        [ 1:0] ctrl_transfer_insn_in_dec;
++  logic        [ 1:0] ctrl_transfer_insn_in_id;
+ 
+   logic               ctrl_busy;
+   logic               if_busy;
+@@ -167,6 +171,28 @@ module cv32e40p_core
+ 
+   logic        [31:0] pc_ex;  // PC of last executed branch or cv.elw
+ 
++  // Branch predictor signals
++  logic        bht_predict_taken;   // BHT direction prediction (registered, 1-cycle read)
++  logic        btb_hit;             // BTB hit (registered, 1-cycle read)
++  logic [31:0] btb_target;          // BTB target (registered, 1-cycle read)
++  logic        pred_taken;          // predict taken = EN && btb_hit && bht_taken
++  logic        pred_req;            // prediction redirect request to IF stage
++  logic        predicted_taken_ex;  // metadata: prediction for the branch in EX
++  logic [31:0] predicted_target_ex; // metadata: predicted target for branch in EX
++  logic        is_compressed_ex;    // metadata: EX branch is compressed
++  logic [31:0] fall_through;        // fall-through target = pc_ex + (2|4)
++  logic        branch_mispredict;   // predicted taken but resolved not-taken
++  logic        branch_retired;      // a conditional branch is retiring in EX
++  logic        bht_update_valid;    // BHT update enable
++  logic        btb_write_valid;     // BTB write enable
++  logic [31:0] next_pc_id;          // PC of the instruction entering ID next cycle
++
++  // Branch predictor statistics (exposed for simulation via hierarchical ref)
++  logic [31:0] bp_branch_total;   // total retired conditional branches
++  logic [31:0] bp_pred_taken;     // number of taken predictions made
++  logic [31:0] bp_mispredict;     // number of mispredictions
++  logic [31:0] bp_correct;        // number of correct predictions
++
+   // ALU Control
+   logic               alu_en_ex;
+   alu_opcode_e        alu_operator_ex;
+@@ -379,6 +405,111 @@ module cv32e40p_core
+   logic clk;
+   logic fetch_enable;
+ 
++  //////////////////////////////////////////////////////////////////////////////
++  // Branch predictor: BHT + BTB integration
++  //
++  // ITER1: the BTB/BHT read ports are SYNCHRONOUS (1-cycle read latency), so
++  // they are indexed by the PC of the instruction that will be in ID NEXT
++  // cycle. When the ID stage is moving on (id_valid), that is pc_if; when it
++  // is stalled/bubbled, the current ID instruction stays put, so it is pc_id.
++  // The prediction data therefore lands exactly in the cycle the instruction
++  // is in ID (reusing the same ID-stage redirect timing), and the branch is
++  // NOT dropped: it still flows to EX where the prediction is verified.
++  //////////////////////////////////////////////////////////////////////////////
++
++  // BTB stores {valid, tag, target} indexed by PC[INDEX_W:1]
++  cv32e40p_btb #(
++      .ENTRIES       (BTB_ENTRIES),
++      .BR_PREDICT_EN (BR_PREDICT_EN)
++  ) btb_i (
++      .clk            (clk_i),
++      .rst_n          (rst_ni),
++      .flush_bp_i     (flush_bp),
++      .debug_mode_i   (debug_mode),
++      .read_pc_i      (next_pc_id),
++      .btb_hit_o      (btb_hit),
++      .btb_target_o   (btb_target),
++      .write_valid_i  (btb_write_valid),
++      .write_pc_i     (pc_ex),
++      .write_target_i (jump_target_ex)
++  );
++
++  // BHT: 2-bit saturating-counter direction predictor indexed by PC[INDEX_W:1]
++  cv32e40p_bht #(
++      .DEPTH         (BHT_DEPTH),
++      .BR_PREDICT_EN (BR_PREDICT_EN)
++  ) bht_i (
++      .clk            (clk_i),
++      .rst_n          (rst_ni),
++      .flush_bp_i     (flush_bp),
++      .debug_mode_i   (debug_mode),
++      .read_pc_i      (next_pc_id),
++      .predict_taken_o(bht_predict_taken),
++      .update_valid_i (bht_update_valid),
++      .update_pc_i    (pc_ex),
++      .update_taken_i (branch_decision)
++  );
++
++  // Predict taken only on a trusted BTB hit (BTB hit AND BHT direction taken).
++  assign pred_taken = BR_PREDICT_EN && btb_hit && bht_predict_taken;
++
++  // PC of the instruction that will be in ID next cycle: pc_if when the ID
++  // stage is moving on, otherwise the current ID PC (stall/bubble). This is
++  // the synchronous-read address for the BTB/BHT (1-cycle read latency).
++  assign next_pc_id = id_valid ? pc_if : pc_id;
++
++  // Prediction redirect: branch in ID and moving to EX (id_valid), it is a
++  // conditional branch, and there is no higher-priority controller redirect.
++  // instr_valid_id gates out stale pc_id/ctrl_transfer values when ID is empty.
++  // Gate on ctrl_transfer_insn_in_id (deassert_we-gated) so pred_req uses the
++  // same qualifier that later becomes branch_in_ex_o (B-G3-001 fix).
++  assign pred_req = pred_taken && instr_valid_id && id_valid &&
++                    (ctrl_transfer_insn_in_id == BRANCH_COND) && ~pc_set;
++
++  // Fall-through target for mispredict recovery (RVC aware: +2 if compressed).
++  assign fall_through = pc_ex + (is_compressed_ex ? 32'd2 : 32'd4);
++
++  // Mispredict: branch in EX was predicted taken but resolved not-taken.
++  assign branch_mispredict = BR_PREDICT_EN && branch_in_ex && ~branch_decision && predicted_taken_ex;
++
++  // A conditional branch retires when it is in EX and the EX stage is valid.
++  assign branch_retired = BR_PREDICT_EN && branch_in_ex && ex_valid;
++
++  // BHT trains on every retired branch; BTB only records actually-taken branches.
++  assign bht_update_valid = branch_retired;
++  assign btb_write_valid  = branch_retired && branch_decision;
++
++  // flush_bp: clear the branch predictor (BTB valid bits + BHT valid bits) on
++  // fence.i, exceptions and context switches. All of these manifest as a pc_set
++  // redirect with a specific pc_mux selector (the controller already emits
++  // pc_set_o/pc_mux_o for them). Priority is inherent: the redirect is a single
++  // pulse, and the predictor's flush only clears valid bits (it cannot corrupt
++  // the tag/target/counter state). The debug_entry (PC_DRET) is intentionally
++  // NOT included so a debugger can keep the trained state across a debug round
++  // trip; normal traps (PC_EXCEPTION) and xret returns (PC_MRET/PC_URET) do
++  // flush, matching CVA6's flush_bp_i semantics.
++  assign flush_bp = pc_set && (
++      pc_mux_id == PC_FENCEI    ||
++      pc_mux_id == PC_EXCEPTION ||
++      pc_mux_id == PC_MRET      ||
++      pc_mux_id == PC_URET
++  );
++
++  // Statistics (prediction count / correct / mispredict / branch total).
++  always_ff @(posedge clk_i, negedge rst_ni) begin
++    if (rst_ni == 1'b0) begin
++      bp_branch_total <= '0;
++      bp_pred_taken   <= '0;
++      bp_mispredict   <= '0;
++      bp_correct      <= '0;
++    end else if (branch_retired) begin
++      bp_branch_total <= bp_branch_total + 1'b1;
++      bp_pred_taken   <= bp_pred_taken + predicted_taken_ex;
++      bp_mispredict   <= bp_mispredict + (predicted_taken_ex != branch_decision);
++      bp_correct      <= bp_correct + (predicted_taken_ex == branch_decision);
++    end
++  end
++
+   cv32e40p_sleep_unit #(
+       .COREV_CLUSTER(COREV_CLUSTER)
+   ) sleep_unit_i (
+@@ -496,6 +627,11 @@ module cv32e40p_core
+       .halt_if_i (halt_if),
+       .id_ready_i(id_ready),
+ 
++      // branch predictor redirect
++      .pred_req_i    (pred_req),
++      .pred_target_i (btb_target),
++      .fall_through_i(fall_through),
++
+       .if_busy_o   (if_busy),
+       .perf_imiss_o(perf_imiss)
+   );
+@@ -548,6 +684,17 @@ module cv32e40p_core
+       .branch_decision_i          (branch_decision),
+       .jump_target_o              (jump_target_id),
+       .ctrl_transfer_insn_in_dec_o(ctrl_transfer_insn_in_dec),
++      .ctrl_transfer_insn_in_id_o (ctrl_transfer_insn_in_id),
++
++      // Branch predictor metadata
++      .predicted_taken_i    (pred_taken),
++      .predicted_target_i   (btb_target),
++      .predicted_taken_ex_o (predicted_taken_ex),
++      .predicted_target_ex_o(predicted_target_ex),
++      .is_compressed_ex_o   (is_compressed_ex),
++      .predicted_taken_ex_i (predicted_taken_ex),
++      .branch_mispredict_i  (branch_mispredict),
++      .fall_through_i       (fall_through),
+ 
+       // IF and ID control signals
+       .clear_instr_valid_o(clear_instr_valid),
+diff --git a/rtl/cv32e40p_id_stage.sv b/rtl/cv32e40p_id_stage.sv
+index f323cbe..896a2a5 100644
+--- a/rtl/cv32e40p_id_stage.sv
++++ b/rtl/cv32e40p_id_stage.sv
+@@ -71,6 +71,20 @@ module cv32e40p_id_stage
+    input  logic        branch_decision_i,
+    output logic [31:0] jump_target_o,
+    output logic [ 1:0] ctrl_transfer_insn_in_dec_o,
++   output logic [ 1:0] ctrl_transfer_insn_in_id_o,
++
++   // Branch predictor metadata (prediction made on this instruction in ID,
++   // carried into EX for verification). Valid only when branch_in_ex_o == 1.
++   input  logic        predicted_taken_i,   // 1 = predicted taken for current ID instruction
++   input  logic [31:0] predicted_target_i,  // predicted target (valid when predicted_taken_i)
++   output logic        predicted_taken_ex_o,
++   output logic [31:0] predicted_target_ex_o,
++   output logic        is_compressed_ex_o,  // current EX instruction is compressed (for fall-through)
++
++   // Branch predictor recovery signals (pass-through to controller)
++   input  logic        predicted_taken_ex_i,  // prediction made for the branch now in EX
++   input  logic        branch_mispredict_i,   // branch in EX predicted taken but resolved not-taken
++   input  logic [31:0] fall_through_i,        // fall-through target for mispredict recovery
+ 
+    // IF and ID stage signals
+    output logic       clear_instr_valid_o,
+@@ -557,6 +571,12 @@ module cv32e40p_id_stage
+ 
+   assign branch_taken_ex = branch_in_ex_o && branch_decision_i;
+ 
++  // Expose the deassert_we-gated ctrl_transfer (same source as branch_in_ex_o)
++  // so the core can gate pred_req with the exact signal that later becomes the
++  // EX-stage branch qualifier (fixes B-G3-001: pred_req previously gated on
++  // ctrl_transfer_insn_in_dec_o, which diverges from branch_in_ex_o when
++  // deassert_we asserts).
++  assign ctrl_transfer_insn_in_id_o = ctrl_transfer_insn_in_id;
+ 
+   assign mult_en = mult_int_en | mult_dot_en;
+ 
+@@ -1195,6 +1215,11 @@ module cv32e40p_id_stage
+       .ctrl_transfer_insn_in_id_i (ctrl_transfer_insn_in_id),
+       .ctrl_transfer_insn_in_dec_i(ctrl_transfer_insn_in_dec_o),
+ 
++      // Branch predictor recovery
++      .predicted_taken_ex_i(predicted_taken_ex_i),
++      .branch_mispredict_i (branch_mispredict_i),
++      .fall_through_i      (fall_through_i),
++
+       // Interrupt signals
+       .irq_wu_ctrl_i     (irq_wu_ctrl),
+       .irq_req_ctrl_i    (irq_req_ctrl),
+@@ -1489,6 +1514,10 @@ module cv32e40p_id_stage
+ 
+       branch_in_ex_o         <= 1'b0;
+ 
++      predicted_taken_ex_o   <= 1'b0;
++      predicted_target_ex_o  <= '0;
++      is_compressed_ex_o     <= 1'b0;
++
+    end else if (data_misaligned_i) begin
+      // misaligned data access case
+      if (ex_ready_i) begin  // misaligned access case, only unstall alu operands
+@@ -1596,6 +1625,10 @@ module cv32e40p_id_stage
+        end
+ 
+        branch_in_ex_o <= ctrl_transfer_insn_in_id == BRANCH_COND;
++
++        predicted_taken_ex_o  <= predicted_taken_i;
++        predicted_target_ex_o <= predicted_target_i;
++        is_compressed_ex_o    <= is_compressed_i;
+      end else if (ex_ready_i) begin
+        // EX stage is ready but we don't have a new instruction for it,
+        // so we set all write enables to 0, but unstall the pipe
+@@ -1614,6 +1647,8 @@ module cv32e40p_id_stage
+ 
+        branch_in_ex_o       <= 1'b0;
+ 
++        predicted_taken_ex_o <= 1'b0;
++
+        apu_en_ex_o          <= 1'b0;
+ 
+        alu_operator_ex_o    <= ALU_SLTU;
+diff --git a/rtl/cv32e40p_if_stage.sv b/rtl/cv32e40p_if_stage.sv
+index 23fd14f..ee8d7d9 100644
+--- a/rtl/cv32e40p_if_stage.sv
++++ b/rtl/cv32e40p_if_stage.sv
+@@ -86,6 +86,11 @@ module cv32e40p_if_stage #(
+    input logic [31:0] jump_target_id_i,  // jump target address
+    input logic [31:0] jump_target_ex_i,  // jump target address
+ 
++   // Branch predictor redirect (from core): prediction taken -> redirect to target
++   input logic        pred_req_i,     // 1 = redirect fetch to pred_target_i this cycle (prediction)
++   input logic [31:0] pred_target_i,  // predicted branch target (valid when pred_req_i)
++   input logic [31:0] fall_through_i,  // fall-through target for mispredict recovery (PC_FALLTHROUGH)
++
+    // from hwloop controller
+    input logic        hwlp_jump_i,
+    input logic [31:0] hwlp_target_i,
+@@ -156,18 +161,25 @@ module cv32e40p_if_stage #(
+    // Default assign PC_BOOT (should be overwritten in below case)
+    branch_addr_n = {boot_addr_i[31:2], 2'b0};
+ 
+-   unique case (pc_mux_i)
+-     PC_BOOT: branch_addr_n = {boot_addr_i[31:2], 2'b0};
+-     PC_JUMP: branch_addr_n = jump_target_id_i;
+-     PC_BRANCH: branch_addr_n = jump_target_ex_i;
+-     PC_EXCEPTION: branch_addr_n = exc_pc;  // set PC to exception handler
+-     PC_MRET: branch_addr_n = mepc_i;  // PC is restored when returning from IRQ/exception
+-     PC_URET: branch_addr_n = uepc_i;  // PC is restored when returning from IRQ/exception
+-     PC_DRET: branch_addr_n = depc_i;  //
+-     PC_FENCEI: branch_addr_n = pc_id_o + 4;  // jump to next instr forces prefetch buffer reload
+-     PC_HWLOOP: branch_addr_n = hwlp_target_i;
+-     default: ;
+-   endcase
++   if (pred_req_i) begin
++     // Branch prediction redirect (highest priority within this mux; the core
++     // guarantees pred_req_i and pc_set_i are mutually exclusive).
++     branch_addr_n = pred_target_i;
++   end else begin
++     unique case (pc_mux_i)
++       PC_BOOT: branch_addr_n = {boot_addr_i[31:2], 2'b0};
++       PC_JUMP: branch_addr_n = jump_target_id_i;
++       PC_BRANCH: branch_addr_n = jump_target_ex_i;
++       PC_EXCEPTION: branch_addr_n = exc_pc;  // set PC to exception handler
++       PC_MRET: branch_addr_n = mepc_i;  // PC is restored when returning from IRQ/exception
++       PC_URET: branch_addr_n = uepc_i;  // PC is restored when returning from IRQ/exception
++       PC_DRET: branch_addr_n = depc_i;  //
++       PC_FENCEI: branch_addr_n = pc_id_o + 4;  // jump to next instr forces prefetch buffer reload
++       PC_HWLOOP: branch_addr_n = hwlp_target_i;
++       PC_FALLTHROUGH: branch_addr_n = fall_through_i;  // mispredict recovery
++       default: ;
++     endcase
++   end
+  end
+ 
+  // tell CS register file to initialize mtvec on boot
+@@ -216,6 +228,8 @@ module cv32e40p_if_stage #(
+    // take care of jumps and branches
+    if (pc_set_i) begin
+      branch_req = 1'b1;
++   end else if (pred_req_i) begin
++     branch_req = 1'b1;  // branch prediction redirect
+    end else if (fetch_valid) begin
+      if (req_i && if_valid) begin
+        fetch_ready = aligner_ready;
+diff --git a/rtl/cv32e40p_top.sv b/rtl/cv32e40p_top.sv
+index 43eee77..4b800cf 100644
+--- a/rtl/cv32e40p_top.sv
++++ b/rtl/cv32e40p_top.sv
+@@ -30,7 +30,10 @@ module cv32e40p_top #(
+    parameter FPU_ADDMUL_LAT = 0,  // Floating-Point ADDition/MULtiplication computing lane pipeline registers number
+    parameter FPU_OTHERS_LAT = 0,  // Floating-Point COMParison/CONVersion computing lane pipeline registers number
+    parameter ZFINX = 0,  // Float-in-General Purpose registers
+-   parameter NUM_MHPMCOUNTERS = 1
++   parameter NUM_MHPMCOUNTERS = 1,
++   parameter BR_PREDICT_EN = 0,  // 1 = enable branch predictor, 0 = fully bypassed
++   parameter int unsigned BHT_DEPTH = 256,
++   parameter int unsigned BTB_ENTRIES = 32  // ITER3: 128->32
+  ) (
+    // Clock and Reset
+    input logic clk_i,
+@@ -104,7 +107,10 @@ module cv32e40p_top #(
+      .FPU_ADDMUL_LAT  (FPU_ADDMUL_LAT),
+      .FPU_OTHERS_LAT  (FPU_OTHERS_LAT),
+      .ZFINX           (ZFINX),
+-     .NUM_MHPMCOUNTERS(NUM_MHPMCOUNTERS)
++     .NUM_MHPMCOUNTERS(NUM_MHPMCOUNTERS),
++     .BR_PREDICT_EN   (BR_PREDICT_EN),
++     .BHT_DEPTH       (BHT_DEPTH),
++     .BTB_ENTRIES     (BTB_ENTRIES)
+  ) core_i (
+      .clk_i (clk_i),
+      .rst_ni(rst_ni),
+diff --git a/rtl/include/cv32e40p_pkg.sv b/rtl/include/cv32e40p_pkg.sv
+index 319e790..13bb7f5 100644
+--- a/rtl/include/cv32e40p_pkg.sv
++++ b/rtl/include/cv32e40p_pkg.sv
+@@ -704,6 +704,7 @@ package cv32e40p_pkg;
+   parameter PC_URET = 4'b0110;
+   parameter PC_DRET = 4'b0111;
+   parameter PC_HWLOOP = 4'b1000;
++  parameter PC_FALLTHROUGH = 4'b1001;  // Branch predictor mispredict recovery (fall-through redirect)
+ 
+   // Exception PC mux selector defines
+   parameter EXC_PC_EXCEPTION = 3'b000;
