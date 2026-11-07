@@ -15,7 +15,7 @@ index 0000000..22f99e5
 +++ b/rtl/cv32e40p_bht.sv
 @@ -0,0 +1,140 @@
 +////////////////////////////////////////////////////////////////////////////////
-+// Engineer:       Agent A (ITER1: synchronous-read BHT)                      //
++// Engineer:       author (synchronous-read BHT)                             //
 +//                                                                            //
 +// Design Name:    cv32e40p_bht                                               //
 +// Project Name:   CV32E40P branch predictor (dynamic, disableable)           //
@@ -24,7 +24,7 @@ index 0000000..22f99e5
 +// Description:    2-bit saturating-counter branch direction predictor        //
 +//                 (BHT). One counter per entry; indexed by low bits of PC.   //
 +//                                                                            //
-+//                 ITER1 change: the PREDICTION read is now synchronous       //
++//                 Iteration 1: the PREDICTION read is now synchronous        //
 +//                 (registered output, 1-cycle read latency), matching the    //
 +//                 BTB so both are driven by pc_if and land in the ID cycle.  //
 +//                 The counter array itself stays an async-reset DFF array    //
@@ -42,7 +42,7 @@ index 0000000..22f99e5
 +//                 BR_PREDICT_EN = 0 => predict_taken_o hardwired to 0 and    //
 +//                 the state is frozen (update ignored).                      //
 +//                                                                            //
-+//                 ITER2 change (robustness):                                 //
++//                 Iteration 2 (robustness):                                  //
 +//                   - per-entry valid bit: reset/flush clears valid, and only //
 +//                     a valid entry may predict taken (cold-start taken loads //
 +//                     no longer predict taken before first training).         //
@@ -62,7 +62,7 @@ index 0000000..22f99e5
 +    input  logic clk,    // Clock
 +    input  logic rst_n,  // Asynchronous reset, active low
 +
-+    // Control gating (ITER2 robustness):
++    // Control gating (robustness):
 +    //   flush_bp_i   : clear all valid bits (fence.i / exception / context switch).
 +    //   debug_mode_i : in debug mode no training happens (update disabled); the
 +    //                  read/predict path is left untouched.
@@ -92,7 +92,7 @@ index 0000000..22f99e5
 +  logic [INDEX_W-1:0] update_index;
 +
 +  // 2-bit saturating counter table (packed so whole table can be reset at once),
-+  // plus a per-entry valid bit (ITER2): only a trained entry may predict taken.
++  // plus a per-entry valid bit: only a trained entry may predict taken.
 +  logic [DEPTH-1:0][1:0] counter_q;
 +  logic [DEPTH-1:0]      valid_q;
 +  logic [1:0]            counter_n;
@@ -161,7 +161,7 @@ index 0000000..d5f0c5c
 +++ b/rtl/cv32e40p_btb.sv
 @@ -0,0 +1,160 @@
 +////////////////////////////////////////////////////////////////////////////////
-+// Engineer:       Agent A (ITER1: synchronous-read SRAM/BRAM BTB)             //
++// Engineer:       author (synchronous-read SRAM/BRAM BTB)                    //
 +//                                                                            //
 +// Design Name:    cv32e40p_btb                                               //
 +// Project Name:   CV32E40P branch predictor (dynamic, disableable)           //
@@ -170,10 +170,10 @@ index 0000000..d5f0c5c
 +// Description:    Direct-mapped + tagged Branch Target Buffer (BTB).         //
 +//                 Each entry = {valid, tag, target}.                         //
 +//                                                                            //
-+//                 ITER1 change: the read port is now a SYNCHRONOUS read      //
++//                 Iteration 1: the read port is now a SYNCHRONOUS read       //
 +//                 (registered output, 1-cycle read latency) so that the tag/ //
 +//                 target array is inferred as a SRAM/BRAM macro instead of a  //
-+//                 per-bit 128:1 read mux (the G6 area explosion). The `valid` //
++//                 per-bit 128:1 read mux (the area explosion). The `valid`   //
 +//                 bit stays a separate async-reset DFF array (a BRAM cannot   //
 +//                 clear its content on reset), so the reset semantics         //
 +//                 (no hit after reset) are unchanged.                        //
@@ -183,7 +183,7 @@ index 0000000..d5f0c5c
 +//                                                                            //
 +//                 Hit  = valid && (tag_q == tag of read PC).                 //
 +//                                                                            //
-+//                 Alias semantics (unchanged from G2):                        //
++//                 Alias semantics:                                            //
 +//                   - Two PCs with the same index but different tags: the    //
 +//                     later write evicts the earlier (direct-mapped conflict).
 +//                   - Two PCs that share index AND tag differ only in bit[0], //
@@ -196,10 +196,10 @@ index 0000000..d5f0c5c
 +//                 PC, one cycle ahead of pc_id) so the prediction lands in   //
 +//                 the ID cycle.                                              //
 +//                                                                            //
-+//                 ITER2 change (robustness):                                 //
++//                 Robustness:                                                //
 +//                   - BR_PREDICT_EN parameter: EN=0 forces btb_hit_o to 0    //
 +//                     and disables write_en, so an EN=0 build constant-folds //
-+//                     the whole tag+target storage away (B-G5-004 closure).  //
++//                     the whole tag+target storage away.                     //
 +//                   - flush_bp_i clears all valid bits (fence.i / exception  //
 +//                     / context switch), leaving tag/target stale but inert. //
 +//                   - debug_mode_i disables training (write), keeps reads.   //
@@ -216,7 +216,7 @@ index 0000000..d5f0c5c
 +    input  logic clk,    // Clock
 +    input  logic rst_n,  // Asynchronous reset, active low
 +
-+    // Control gating (ITER2 robustness):
++    // Control gating (robustness):
 +    //   flush_bp_i   : clear all valid bits (fence.i / exception / context switch).
 +    //   debug_mode_i : in debug mode no training happens (write disabled); the
 +    //                  read/predict path is left untouched.
@@ -296,7 +296,7 @@ index 0000000..d5f0c5c
 +  // when the predictor is disabled so the storage can be constant-folded away.
 +  // btb_target_o is also forced to 0 at EN=0 so the tag+target read path has no
 +  // live output and mem_q / valid_q / the read registers all become dead logic
-+  // that synthesis eliminates (this is what closes B-G5-004).
++  // that synthesis eliminates (this disables BTB storage at EN=0).
 +  assign btb_hit_o    = BR_PREDICT_EN && rvalid_q && (rdata_q[DATA_W-1:32] == rtag_q);
 +  assign btb_target_o = BR_PREDICT_EN ? rdata_q[31:0] : 32'd0;
 +
@@ -394,7 +394,7 @@ index 4275cf9..9eab7a5 100644
 +   parameter NUM_MHPMCOUNTERS = 1,
 +   parameter BR_PREDICT_EN = 0,  // 1 = enable branch predictor, 0 = fully bypassed
 +   parameter int unsigned BHT_DEPTH = 256,  // BHT number of entries
-+   parameter int unsigned BTB_ENTRIES = 32  // BTB number of entries (ITER3: 128->32)
++   parameter int unsigned BTB_ENTRIES = 32  // BTB number of entries (128->32)
   ) (
     // Clock and Reset
     input logic clk_i,
@@ -442,8 +442,8 @@ index 4275cf9..9eab7a5 100644
 +  //////////////////////////////////////////////////////////////////////////////
 +  // Branch predictor: BHT + BTB integration
 +  //
-+  // ITER1: the BTB/BHT read ports are SYNCHRONOUS (1-cycle read latency), so
-+  // they are indexed by the PC of the instruction that will be in ID NEXT
++  // Iteration 1: the BTB/BHT read ports are SYNCHRONOUS (1-cycle read latency),
++  // so they are indexed by the PC of the instruction that will be in ID NEXT
 +  // cycle. When the ID stage is moving on (id_valid), that is pc_if; when it
 +  // is stalled/bubbled, the current ID instruction stays put, so it is pc_id.
 +  // The prediction data therefore lands exactly in the cycle the instruction
@@ -496,7 +496,7 @@ index 4275cf9..9eab7a5 100644
 +  // conditional branch, and there is no higher-priority controller redirect.
 +  // instr_valid_id gates out stale pc_id/ctrl_transfer values when ID is empty.
 +  // Gate on ctrl_transfer_insn_in_id (deassert_we-gated) so pred_req uses the
-+  // same qualifier that later becomes branch_in_ex_o (B-G3-001 fix).
++  // same qualifier that later becomes branch_in_ex_o (pred_req gating fix).
 +  assign pred_req = pred_taken && instr_valid_id && id_valid &&
 +                    (ctrl_transfer_insn_in_id == BRANCH_COND) && ~pc_set;
 +
@@ -608,9 +608,7 @@ index f323cbe..896a2a5 100644
  
 +  // Expose the deassert_we-gated ctrl_transfer (same source as branch_in_ex_o)
 +  // so the core can gate pred_req with the exact signal that later becomes the
-+  // EX-stage branch qualifier (fixes B-G3-001: pred_req previously gated on
-+  // ctrl_transfer_insn_in_dec_o, which diverges from branch_in_ex_o when
-+  // deassert_we asserts).
++  // EX-stage branch qualifier (pred_req gating fix).
 +  assign ctrl_transfer_insn_in_id_o = ctrl_transfer_insn_in_id;
  
    assign mult_en = mult_int_en | mult_dot_en;
@@ -733,7 +731,7 @@ index 43eee77..4b800cf 100644
 +   parameter NUM_MHPMCOUNTERS = 1,
 +   parameter BR_PREDICT_EN = 0,  // 1 = enable branch predictor, 0 = fully bypassed
 +   parameter int unsigned BHT_DEPTH = 256,
-+   parameter int unsigned BTB_ENTRIES = 32  // ITER3: 128->32
++   parameter int unsigned BTB_ENTRIES = 32  // 128->32
   ) (
     // Clock and Reset
     input logic clk_i,
