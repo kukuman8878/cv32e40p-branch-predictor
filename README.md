@@ -1,10 +1,11 @@
 # CV32E40P 动态分支预测优化
 
-在 OpenHW Group **CV32E40P**（32 位、四级顺序流水线 RISC-V 核）上增加**可关闭的动态分支预测**（2-bit 饱和计数器 BHT + 带 tag 的直接映射 BTB），完成正确性验证、可复现实验与面积评估。
+在 OpenHW Group **CV32E40P**（32 位、四级顺序流水线 RISC-V 核）上增加**可关闭的动态分支预测**
+（2-bit 饱和计数器 BHT + 带 tag 的直接映射 BTB），完成正确性验证、可复现实验与面积评估。
 
 - 基线：`openhwfoundation/cv32e40p` @ `b353438ff469c030c89f6804f3b24a2852880e8b`
 - 实现方式：一个补丁 `branch-predictor.patch`（应用后得到全部预测器 RTL 改动）
-- 流程：双 Agent（A 实施 / B 独立审核）按 G0–G6 七 Gate 推进，全部 PASS
+- 开发流程：按阶段推进（架构分析 → 基线冻结 → 单测 → 集成 → 全回归 → 性能/PPA → 交付）
 
 ## 结果摘要
 
@@ -27,7 +28,7 @@ cv32e40p-branch-predictor/
 │   ├── 01_architecture_map.md   # 取指路径图、信号表（file:line）、风险清单
 │   ├── 03_verification_plan.md  # 环境/工具链/编译选项/复现命令
 │   ├── 04_results.md            # 最终设计报告与结果汇总
-│   ├── 05_area_decision.md      # 面积口径裁决
+│   ├── 05_area_decision.md      # 面积口径说明
 │   └── 06_related_work.md       # 开源借鉴（CVA6 前端等）
 ├── scripts/                 # 复现脚本
 │   ├── run_all.sh           # 一键：基线 → EN0/EN1 回归 → 单测 → 综合
@@ -100,7 +101,7 @@ CV32E40P 的条件分支在 **EX** 阶段决议、跳转（JAL/JALR）在 **ID**
 
 - **条件分支预测有收益**（IF 预测省 EX→IF 重定向气泡）——即本项目的 BHT/BTB。
 - **跳转/返回预测零收益**（ID 已决议，同拍等价）——本项目曾实现 JAL 预测与 RAS，
-  实测确认零收益后已回退（详见 `docs/04_results.md` §8）。
+  实测确认零收益后已回退（详见 `docs/04_results.md`）。
 
 面积从原始寄存器 BTB 的 +155.41% 优化到同步读 SRAM 的 +25.2%，根因是"异步组合读被
 综合工具摊平为逐 bit 的 128:1 mux"，改为同步读即可让综合工具推断 block RAM。
