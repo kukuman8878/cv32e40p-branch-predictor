@@ -99,7 +99,7 @@ verification_irq_handler:
 .section .rodata
 illegal_insn_msg:
 	.string "illegal instruction exception handler entered\n"
-ecalls_msg:
+ecall_msg:
 	.string "ecall exception handler entered\n"
 ebreak_msg:
 	.string "ebreak exception handler entered\n"
