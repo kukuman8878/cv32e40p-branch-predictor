@@ -1,5 +1,5 @@
 #!/bin/bash
-# G2 unit tests: lint + build + run the BHT/BTB predictor modules in isolation.
+# Unit tests: lint + build + run the BHT/BTB predictor modules in isolation.
 #
 #   ./scripts/run_unit_tests.sh
 #
@@ -35,7 +35,7 @@ BUILD_FLAGS="--binary --timing -Wall -Wno-fatal \
 declare -A LINT_RC TEST_RC
 
 {
-  echo "--- G2 unit-test environment snapshot ---"
+  echo "--- unit-test environment snapshot ---"
   echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "uname: $(uname -a)"
   echo "verilator: $VER"
@@ -76,7 +76,7 @@ else
 fi
 
 echo
-echo "========================== G2 UNIT TEST SUMMARY =========================="
+echo "========================== UNIT TEST SUMMARY =========================="
 printf "%-6s %-10s %-10s %-10s\n" "module" "lint" "test" "test_rc"
 for m in bht btb; do
   lstr="err(${LINT_RC[$m]})"

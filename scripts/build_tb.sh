@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the CV32E40P + example_tb Verilator model (G1 baseline freeze).
+# Build the CV32E40P + example_tb Verilator model.
 # Reads RTL read-only from the fixed-commit repo, and uses the locally patched
 # tb in project/tb/ (parameter renames COREV_PULP/COREV_CLUSTER, clock gate,
 # byte-granular firmware load, +verbose-gated monitor, cycle counter).

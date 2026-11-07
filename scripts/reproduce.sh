@@ -1,5 +1,5 @@
 #!/bin/bash
-# G1 baseline freeze: one-command reproduction.
+# Baseline freeze: one-command reproduction.
 #
 #   1) compile the 5 firmware images (hello_world, fib, branch_heavy, mixed,
 #      low_branch) with a single picolibc-based bare-metal framework,
@@ -35,7 +35,6 @@ INCDIR="$RISCV_ROOT/riscv32-unknown-elf/include"
 LIBDIR="$RISCV_ROOT/riscv32-unknown-elf/lib/rv32im/ilp32"
 LDFLAGS="-nostdlib -static -T $TESTS_DIR/link.ld"
 
-# programs: name -> C source
 PROGS="hello_world fib branch_heavy mixed low_branch"
 
 MAXCYCLES="${MAXCYCLES:-5000000}"
@@ -44,7 +43,7 @@ mkdir -p "$LOGS_DIR"
 
 # ---- 0) environment snapshot ----
 {
-  echo "--- G1 reproduce environment snapshot ---"
+  echo "--- reproduce environment snapshot ---"
   echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "uname: $(uname -a)"
   echo "gcc: $(${RISCV_PREFIX}gcc --version | head -1)"
@@ -94,7 +93,7 @@ done
 
 # ---- 4) summary ----
 echo
-echo "=========================== G1 BASELINE SUMMARY ==========================="
+echo "=========================== BASELINE SUMMARY ==========================="
 printf "%-14s %-8s %-12s %s\n" "program" "result" "cycles" "hex"
 for name in $PROGS; do
   printf "%-14s %-8s %-12s %s\n" "$name" "${RESULT[$name]}" "${CYCLES[$name]}" \

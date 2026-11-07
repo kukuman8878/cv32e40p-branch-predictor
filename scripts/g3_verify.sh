@@ -1,8 +1,8 @@
 #!/bin/bash
-# G3 branch-predictor integration verification.
+# Branch-predictor integration verification.
 #
 # Builds and runs the CV32E40P + example_tb model twice:
-#   EN=0  (BR_PREDICT_EN=0, default) -> must be cycle-identical to G1 baseline
+#   EN=0  (BR_PREDICT_EN=0, default) -> must be cycle-identical to baseline
 #   EN=1  (BR_PREDICT_EN=1)          -> functional correctness + prediction stats
 #
 # Outputs:
@@ -68,6 +68,6 @@ for name in $PROGS; do
 done
 
 echo
-echo "===== G3 VERIFY SUMMARY ====="
+echo "===== VERIFY SUMMARY ====="
 cat "$CSV"
 echo "===== logs: $LOGS_DIR ====="

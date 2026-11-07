@@ -1,25 +1,21 @@
 #!/bin/bash
-# G6 engineering delivery: one-command end-to-end reproduction.
+# Engineering delivery: one-command end-to-end reproduction.
 #
 #   ./scripts/run_all.sh
 #
 # Chains the four stage scripts in the order they depend on each other, then
 # emits a single consolidated summary:
 #
-#   stage 1  reproduce.sh        G1 baseline: compile 5 firmware + build EN=0
+#   stage 1  reproduce.sh        baseline: compile 5 firmware + build EN=0
 #                                + run 5 benchmarks (generates *.hex used later)
 #   stage 2  g3_verify.sh        EN=0 / EN=1 functional regression (5 benchmarks
 #                                on both models, cycle comparison)
-#   stage 3  run_unit_tests.sh   G2 BHT/BTB lint + self-checking unit tests
-#   stage 4  synth_full.sh       G5 full-core synthesis BASE / EN=0 / EN=1
+#   stage 3  run_unit_tests.sh   BHT/BTB lint + self-checking unit tests
+#   stage 4  synth_full.sh       full-core synthesis BASE / EN=0 / EN=1
 #                                (sv2v + Yosys) + cell-count summary CSV
 #
 # Exit code 0 iff every stage exits 0 AND the key result artifacts are present
-# with no "FAIL" marker. Partial results are kept on disk even if a later stage
-# fails (a stage's artifacts are not deleted between runs).
-#
-# No rtl/*.sv is modified. All artifacts land under project/metrics/,
-# project/sim_build*/ and project/synth/.
+# with no "FAIL" marker.
 
 set -uo pipefail
 
